@@ -9,15 +9,22 @@ load_dotenv()
 # Tempo máximo (em segundos) de cada requisição à API
 TIMEOUT_SEGUNDOS = int(os.getenv("GEMINI_TIMEOUT", "60"))
 
+# Códigos de erro em que vale a pena tentar outro modelo
+CODIGOS_TENTAR_PROXIMO = (404, 429, 500, 502, 503, 504)
+
 
 class GeminiClient:
-    def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY")
+    def __init__(self, api_key: str | None = None):
+        # Uma chave informada pelo usuário na interface tem prioridade sobre a do .env
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.model_name = os.getenv("MODELO_GEMINI", "gemini-3.8-flash")
         # Modelos alternativos (separados por vírgula) usados se o principal estiver indisponível
         self.modelos_reserva = [
             m.strip()
-            for m in os.getenv("MODELOS_GEMINI_RESERVA", "gemini-3.7-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",")
+            for m in os.getenv(
+                "MODELOS_GEMINI_RESERVA",
+                "gemini-3.7-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite",
+            ).split(",")
             if m.strip() and m.strip() != self.model_name
         ]
 
@@ -39,20 +46,20 @@ class GeminiClient:
             ),
         )
 
-    def gerar_resposta(self, prompt: str) -> str:
-        """Envia o prompt ao modelo configurado, tentando os modelos reserva se ele estiver indisponível."""
+    def _gerar(self, contents, config: types.GenerateContentConfig | None = None) -> str:
+        """Chama o modelo principal e, se ele estiver indisponível, os modelos reserva."""
         ultimo_erro = None
         for modelo in [self.model_name, *self.modelos_reserva]:
             try:
                 response = self.client.models.generate_content(
                     model=modelo,
-                    contents=prompt,
+                    contents=contents,
+                    config=config,
                 )
-                return response.text
+                return response.text or ""
             except errors.APIError as e:
                 ultimo_erro = e
-                # 503/429/5xx: modelo sobrecarregado -> tenta o próximo; 404: modelo inexistente -> tenta o próximo
-                if e.code in (404, 429, 500, 502, 503, 504):
+                if e.code in CODIGOS_TENTAR_PROXIMO:
                     print(f"[GeminiClient] Modelo '{modelo}' indisponível ({e.code}). Tentando o próximo...")
                     continue
                 raise RuntimeError(f"Erro ao comunicar com a API do Gemini: {e}") from e
@@ -65,3 +72,24 @@ class GeminiClient:
             "Nenhum modelo do Gemini respondeu. A API pode estar sobrecarregada; "
             f"tente novamente em alguns minutos. Último erro: {ultimo_erro}"
         )
+
+    def gerar_resposta(self, prompt: str) -> str:
+        """Envia um prompt único e devolve o texto da resposta."""
+        return self._gerar(prompt)
+
+    def conversar(self, mensagens: list[dict], instrucao_sistema: str) -> str:
+        """
+        Continua uma conversa de vários turnos.
+
+        `mensagens` é uma lista de {"role": "user" | "assistant", "content": str}.
+        `instrucao_sistema` define o papel e as regras do assistente.
+        """
+        contents = [
+            types.Content(
+                role="model" if m["role"] == "assistant" else "user",
+                parts=[types.Part(text=m["content"])],
+            )
+            for m in mensagens
+        ]
+        config = types.GenerateContentConfig(system_instruction=instrucao_sistema)
+        return self._gerar(contents, config)

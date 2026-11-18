@@ -2,8 +2,8 @@ import json
 from app.gemini_client import GeminiClient
 
 class AdaptadorCurriculo:
-    def __init__(self):
-        self.gemini = GeminiClient()
+    def __init__(self, api_key: str | None = None):
+        self.gemini = GeminiClient(api_key=api_key)
 
     def adaptar(self, perfil_json: dict, analise_vaga: dict) -> dict:
         """
